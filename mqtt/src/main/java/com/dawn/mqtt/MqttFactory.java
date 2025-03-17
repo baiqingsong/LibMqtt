@@ -44,7 +44,7 @@ public class MqttFactory {
     private String offlineCommand;//下线命令
     private String reconnectCommand;//重连命令
 
-    public void init(String serverUri, String clientId, String username, String password, String topic, String offlineCommand, String onlineCommand, MqttListener listener) {
+    public void init(String serverUri, String clientId, String username, String password, String topic, String onlineCommand, String offlineCommand, MqttListener listener) {
         try {
             this.topic = topic;
             this.onlineCommand = onlineCommand;
@@ -78,7 +78,7 @@ public class MqttFactory {
                     connected = false;
                     handler.post(runnable);
                     if(listener != null)
-                        listener.onConnectionLost();
+                        listener.onConnectFailure();
                 }
 
                 @Override
