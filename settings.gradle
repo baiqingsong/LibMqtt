@@ -1,2 +1,3 @@
 rootProject.name = "LibMqtt"
 include ':app'
+include ':mqtt'
