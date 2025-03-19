@@ -40,15 +40,11 @@ public class MqttFactory {
     };
 
     private String topic;//主题
-    private String onlineCommand;//上线命令
-    private String offlineCommand;//下线命令
     private String reconnectCommand;//重连命令
 
-    public void init(String serverUri, String clientId, String username, String password, String topic, String onlineCommand, String offlineCommand, MqttListener listener) {
+    public void init(String serverUri, String clientId, String username, String password, String topic, String onlineCommand, String offlineCommand, String reconnectCommand, MqttListener listener) {
         try {
             this.topic = topic;
-            this.onlineCommand = onlineCommand;
-            this.offlineCommand = offlineCommand;
             this.reconnectCommand = reconnectCommand;
             mqttClient = new MqttClient(serverUri, clientId, new MemoryPersistence());
             mqttConnectOptions = new MqttConnectOptions();
