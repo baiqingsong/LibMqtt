@@ -38,4 +38,5 @@ dependencies {
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.3.0'
 
     implementation project(path: ':mqtt')
+    implementation 'com.github.baiqingsong:Libbase:1.2.7'
 }

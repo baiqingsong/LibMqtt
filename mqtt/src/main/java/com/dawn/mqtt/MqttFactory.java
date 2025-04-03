@@ -42,7 +42,7 @@ public class MqttFactory {
     private String topic;//主题
     private String reconnectCommand;//重连命令
 
-    public void init(String serverUri, String clientId, String username, String password, String topic, String onlineCommand, String offlineCommand, String reconnectCommand, MqttListener listener) {
+    public void init(String serverUri, String clientId, String username, String password, String topic, String topicService, String onlineCommand, String offlineCommand, String reconnectCommand, MqttListener listener) {
         try {
             this.topic = topic;
             this.reconnectCommand = reconnectCommand;
@@ -62,8 +62,7 @@ public class MqttFactory {
             //设置好心跳后如果客户端在1.5个心跳时间没有发送心跳包（16位的字）服务器就断定和客户端失去连接。
             mqttConnectOptions.setKeepAliveInterval(20);
             mqttClient.connect(mqttConnectOptions);
-            if(!topic.isEmpty())
-                subscribeToTopic(topic);
+            subscribeToTopic(topicService);
             if(!onlineCommand.isEmpty())
                 publishMessage(topic, onlineCommand);
 
