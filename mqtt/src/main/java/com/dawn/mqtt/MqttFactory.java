@@ -1,6 +1,7 @@
 package com.dawn.mqtt;
 
 import android.os.Handler;
+import android.util.Log;
 
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallback;
@@ -71,6 +72,7 @@ public class MqttFactory {
                 public void connectionLost(Throwable cause) {
                     //断开连接，重连
                     connected = false;
+                    isSubscribed = false; // Reset the subscription flag
                     handler.post(runnable);
                     if(listener != null)
                         listener.onConnectFailure();
@@ -95,15 +97,17 @@ public class MqttFactory {
         }
     }
 
+    private boolean isSubscribed = false;
     /**
      * 订阅主题
      * @param topic 主题
      */
     public void subscribeToTopic(String topic) {
-        if(mqttClient == null)
+        if(mqttClient == null || isSubscribed)
             return;
         try {
             mqttClient.subscribe(topic);
+            isSubscribed = true;
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -130,10 +134,18 @@ public class MqttFactory {
             if (mqttClient != null) {
                 if (!mqttClient.isConnected()) {
                     //要下面这行代码，就不要设置 mqttConnectOptions.setAutomaticReconnect(true)
-                    mqttClient.connect(mqttConnectOptions);
-                    //重连上后需要重新订阅，不然收不到订阅消息
-                    subscribeToTopic(topic);
-                    publishMessage(topic, reconnectCommand);
+                    try{
+                        mqttClient.connect(mqttConnectOptions);
+                        //重连上后需要重新订阅，不然收不到订阅消息
+//                        subscribeToTopic(topic);
+                        if (!isSubscribed) { // 避免重复订阅
+                            subscribeToTopic(topic);
+                            isSubscribed = true;
+                        }
+                        publishMessage(topic, reconnectCommand);
+                    }catch (Exception e){
+                        Log.i("dawn", "mqtt 重新连接失败");
+                    }
                 } else {
                     handler.removeCallbacks(runnable);
                 }
@@ -148,8 +160,10 @@ public class MqttFactory {
      */
     public void disconnect() {
         try {
-            if (mqttClient != null && mqttClient.isConnected())
+            if (mqttClient != null && mqttClient.isConnected()) {
                 mqttClient.disconnect();
+                isSubscribed = false; // 重置订阅标志
+            }
         } catch (Exception e) {
             e.printStackTrace();
         }
