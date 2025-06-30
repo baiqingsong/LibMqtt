@@ -44,6 +44,11 @@ public class MqttFactory {
     private String reconnectCommand;//重连命令
 
     public void init(String serverUri, String clientId, String username, String password, String topic, String topicService, String onlineCommand, String offlineCommand, String reconnectCommand, MqttListener listener) {
+        init(serverUri, clientId, username, password, topic, topicService, onlineCommand, offlineCommand, reconnectCommand, listener, 20);
+    }
+
+    private boolean isSubscribed = false;
+    public void init(String serverUri, String clientId, String username, String password, String topic, String topicService, String onlineCommand, String offlineCommand, String reconnectCommand, MqttListener listener, int timeout) {
         try {
             this.topic = topic;
             this.reconnectCommand = reconnectCommand;
@@ -61,7 +66,7 @@ public class MqttFactory {
             mqttConnectOptions.setCleanSession(false);
             mqttConnectOptions.setConnectionTimeout(10);
             //设置好心跳后如果客户端在1.5个心跳时间没有发送心跳包（16位的字）服务器就断定和客户端失去连接。
-            mqttConnectOptions.setKeepAliveInterval(20);
+            mqttConnectOptions.setKeepAliveInterval(timeout);
             mqttClient.connect(mqttConnectOptions);
             subscribeToTopic(topicService);
             if(!onlineCommand.isEmpty())
@@ -72,7 +77,6 @@ public class MqttFactory {
                 public void connectionLost(Throwable cause) {
                     //断开连接，重连
                     connected = false;
-                    isSubscribed = false; // Reset the subscription flag
                     handler.post(runnable);
                     if(listener != null)
                         listener.onConnectFailure();
@@ -97,7 +101,6 @@ public class MqttFactory {
         }
     }
 
-    private boolean isSubscribed = false;
     /**
      * 订阅主题
      * @param topic 主题
