@@ -134,25 +134,32 @@ public class MqttFactory {
      */
     private void reConnect(String topic, String reconnectCommand) {
         try {
-            if (mqttClient != null) {
-                if (!mqttClient.isConnected()) {
-                    //要下面这行代码，就不要设置 mqttConnectOptions.setAutomaticReconnect(true)
-                    try{
-                        mqttClient.connect(mqttConnectOptions);
-                        //重连上后需要重新订阅，不然收不到订阅消息
+            new Thread(){
+                @Override
+                public void run() {
+                    super.run();
+                    if (mqttClient != null) {
+                        if (!mqttClient.isConnected()) {
+                            //要下面这行代码，就不要设置 mqttConnectOptions.setAutomaticReconnect(true)
+                            try{
+                                mqttClient.connect(mqttConnectOptions);
+                                //重连上后需要重新订阅，不然收不到订阅消息
 //                        subscribeToTopic(topic);
-                        if (!isSubscribed) { // 避免重复订阅
-                            subscribeToTopic(topic);
-                            isSubscribed = true;
+                                if (!isSubscribed) { // 避免重复订阅
+                                    subscribeToTopic(topic);
+                                    isSubscribed = true;
+                                }
+                                publishMessage(topic, reconnectCommand);
+                            }catch (Exception e){
+                                Log.i("dawn", "mqtt 重新连接失败");
+                            }
+                        } else {
+                            handler.removeCallbacks(runnable);
                         }
-                        publishMessage(topic, reconnectCommand);
-                    }catch (Exception e){
-                        Log.i("dawn", "mqtt 重新连接失败");
                     }
-                } else {
-                    handler.removeCallbacks(runnable);
                 }
-            }
+            }.start();
+
         } catch (Exception e) {
             e.printStackTrace();
         }
