@@ -1,20 +1,49 @@
 package com.dawn.mqtt;
 
-import android.os.Handler;
-import android.util.Log;
-
-import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
-import org.eclipse.paho.client.mqttv3.MqttCallback;
-import org.eclipse.paho.client.mqttv3.MqttClient;
-import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
-import org.eclipse.paho.client.mqttv3.MqttException;
-import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.eclipse.paho.client.mqttv3.*;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * MQTT工厂类 - 极简版本
+ * 
+ * 特点：
+ * - 不依赖Android特定组件
+ * - 只包含基本MQTT功能
+ * - 线程安全的单例模式
+ * - 最小化外部依赖
+ * 
+ * 使用示例：
+ * <pre>
+ * MqttConfig config = new MqttConfig.Builder("tcp://broker.hivemq.com:1883", "client123")
+ *     .username("user")
+ *     .password("pass")
+ *     .qos(1)
+ *     .build();
+ * 
+ * MqttFactory.getInstance().init(config, listener);
+ * MqttFactory.getInstance().connect();
+ * </pre>
+ */
 public class MqttFactory {
-    private static MqttFactory instance;
+    private static final String TAG = "MqttFactory";
+    private static volatile MqttFactory instance;
+    
+    private MqttAsyncClient mqttClient;
+    private MqttConfig config;
+    private MqttListener listener;
+    
+    // 连接状态管理（线程安全）
+    private final AtomicBoolean isInitialized = new AtomicBoolean(false);
+    private final AtomicBoolean isConnecting = new AtomicBoolean(false);
+    private final AtomicBoolean isConnected = new AtomicBoolean(false);
 
+    private MqttFactory() {}
+
+    /**
+     * 获取单例实例（线程安全）
+     */
     public static MqttFactory getInstance() {
         if (instance == null) {
             synchronized (MqttFactory.class) {
@@ -26,142 +55,287 @@ public class MqttFactory {
         return instance;
     }
 
-    private MqttClient mqttClient;
-    private MqttConnectOptions mqttConnectOptions;
-    private boolean connected;//是否连接成功
-    private Handler handler = new Handler();
-    private Runnable runnable = new Runnable() {
-        @Override
-        public void run() {
-            if (!connected) {
-                reConnect(topic, reconnectCommand);
-                handler.postDelayed(this, 5000);
-            }
+    /**
+     * 初始化MQTT工厂
+     * @param config MQTT配置
+     * @param listener 事件监听器
+     */
+    public synchronized void init(MqttConfig config, MqttListener listener) {
+        if (isInitialized.get()) {
+            log("MQTT工厂已经初始化");
+            return;
         }
-    };
-
-    private String topic;//主题
-    private String reconnectCommand;//重连命令
-
-    public void init(String serverUri, String clientId, String username, String password, String topic, String topicService, String onlineCommand, String offlineCommand, String reconnectCommand, MqttListener listener) {
-        init(serverUri, clientId, username, password, topic, topicService, onlineCommand, offlineCommand, reconnectCommand, listener, 20);
+        
+        if (config == null) {
+            throw new IllegalArgumentException("MqttConfig不能为null");
+        }
+        if (listener == null) {
+            throw new IllegalArgumentException("MqttListener不能为null");
+        }
+        
+        this.config = config;
+        this.listener = listener;
+        
+        try {
+            createMqttClient();
+            isInitialized.set(true);
+            log("MQTT工厂初始化成功");
+        } catch (Exception e) {
+            logError("MQTT工厂初始化失败", e);
+            throw new RuntimeException("MQTT初始化失败", e);
+        }
     }
 
-    private boolean isSubscribed = false;
-    public void init(String serverUri, String clientId, String username, String password, String topic, String topicService, String onlineCommand, String offlineCommand, String reconnectCommand, MqttListener listener, int timeout) {
-        try {
-            this.topic = topic;
-            this.reconnectCommand = reconnectCommand;
-            mqttClient = new MqttClient(serverUri, clientId, new MemoryPersistence());
-            mqttConnectOptions = new MqttConnectOptions();
-            mqttConnectOptions.setUserName(username);
-            mqttConnectOptions.setPassword(password.toCharArray());
-            //设置遗嘱消息
-            //qos为0：“至多一次”，消息发布完全依赖底层 TCP/IP 网络。会发生消息丢失或重复。这一级别可用于如下情况，环境传感器数据，丢失一次读记录无所谓，因为不久后还会有第二次发送。
-            //qos为1：“至少一次”，确保消息到达，但消息重复可能会发生。这一级别可用于如下情况，你需要获得每一条消息，并且消息重复发送对你的使用场景无影响。
-            //qos为2：“只有一次”，确保消息到达一次。这一级别可用于如下情况，在计费系统中，消息重复或丢失会导致不正确的结果。
-            if(!topic.isEmpty() || !offlineCommand.isEmpty())
-                mqttConnectOptions.setWill(topic, offlineCommand.getBytes(), 2, true);
-            ///设置是否清空session,这里如果设置为false表示服务器会保留客户端的连接记录，这里设置为true表示每次连接到服务器都以新的身份连接
-            mqttConnectOptions.setCleanSession(false);
-            mqttConnectOptions.setConnectionTimeout(10);
-            //设置好心跳后如果客户端在1.5个心跳时间没有发送心跳包（16位的字）服务器就断定和客户端失去连接。
-            mqttConnectOptions.setKeepAliveInterval(timeout);
-            mqttClient.connect(mqttConnectOptions);
-            subscribeToTopic(topicService);
-            if(!onlineCommand.isEmpty())
-                publishMessage(topic, onlineCommand);
-
-            mqttClient.setCallback(new MqttCallback() {
-                @Override
-                public void connectionLost(Throwable cause) {
-                    //断开连接，重连
-                    connected = false;
-                    handler.post(runnable);
-                    if(listener != null)
-                        listener.onConnectFailure();
+    /**
+     * 创建MQTT客户端
+     */
+    private void createMqttClient() throws Exception {
+        String serverUri = config.getServerUri();
+        String clientId = config.getClientId();
+        
+        // 使用内存持久化（简化版本）
+        MemoryPersistence persistence = new MemoryPersistence();
+        mqttClient = new MqttAsyncClient(serverUri, clientId, persistence);
+        
+        // 设置回调
+        mqttClient.setCallback(new MqttCallbackExtended() {
+            @Override
+            public void connectComplete(boolean reconnect, String serverURI) {
+                isConnected.set(true);
+                isConnecting.set(false);
+                log("MQTT连接成功: " + serverURI + (reconnect ? " (重连)" : ""));
+                
+                if (listener != null) {
+                    listener.onConnectSuccess();
                 }
+            }
 
-                @Override
-                public void messageArrived(String topic, MqttMessage message) throws Exception {
-                    if(listener != null)
-                        listener.onMessageArrived(topic, message.toString());
+            @Override
+            public void connectionLost(Throwable cause) {
+                isConnected.set(false);
+                isConnecting.set(false);
+                logError("MQTT连接丢失", cause);
+                
+                if (listener != null) {
+                    listener.onConnectionLost(cause);
                 }
+            }
 
-                @Override
-                public void deliveryComplete(IMqttDeliveryToken token) {
-                    connected = true;
-                    if(listener != null)
-                        listener.onConnectSuccess();
+            @Override
+            public void messageArrived(String topic, MqttMessage message) throws Exception {
+                String messageStr = new String(message.getPayload());
+                log("收到消息 [" + topic + "]: " + messageStr);
+                
+                if (listener != null) {
+                    listener.onMessageArrived(topic, messageStr);
                 }
-            });
+            }
 
-        } catch (MqttException e) {
-            e.printStackTrace();
+            @Override
+            public void deliveryComplete(IMqttDeliveryToken token) {
+                try {
+                    String topic = token.getTopics()[0];
+                    String message = new String(token.getMessage().getPayload());
+                    log("消息发送完成 [" + topic + "]: " + message);
+                    
+                    if (listener != null) {
+                        listener.onMessageDelivered(topic, message);
+                    }
+                } catch (Exception e) {
+                    logError("处理消息发送完成事件失败", e);
+                }
+            }
+        });
+        
+        log("MQTT客户端创建成功: " + serverUri);
+    }
+
+    /**
+     * 连接到MQTT服务器
+     */
+    public void connect() {
+        if (!isInitialized.get()) {
+            throw new IllegalStateException("MQTT工厂未初始化，请先调用init()方法");
         }
+        
+        if (isConnected.get()) {
+            log("MQTT已经连接");
+            return;
+        }
+        
+        if (isConnecting.compareAndSet(false, true)) {
+            try {
+                MqttConnectOptions options = createConnectOptions();
+                
+                mqttClient.connect(options, null, new IMqttActionListener() {
+                    @Override
+                    public void onSuccess(IMqttToken asyncActionToken) {
+                        log("MQTT连接请求成功");
+                    }
+
+                    @Override
+                    public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
+                        isConnecting.set(false);
+                        logError("MQTT连接失败", exception);
+                        
+                        if (listener != null) {
+                            listener.onConnectFailure(exception);
+                        }
+                    }
+                });
+                
+            } catch (Exception e) {
+                isConnecting.set(false);
+                logError("MQTT连接异常", e);
+                
+                if (listener != null) {
+                    listener.onConnectFailure(e);
+                }
+            }
+        } else {
+            log("MQTT正在连接中...");
+        }
+    }
+
+    /**
+     * 创建连接选项
+     */
+    private MqttConnectOptions createConnectOptions() {
+        MqttConnectOptions options = new MqttConnectOptions();
+        
+        // 基本设置
+        if (config.getUsername() != null && !config.getUsername().isEmpty()) {
+            options.setUserName(config.getUsername());
+        }
+        if (config.getPassword() != null && !config.getPassword().isEmpty()) {
+            options.setPassword(config.getPassword().toCharArray());
+        }
+        
+        options.setKeepAliveInterval(config.getKeepAliveInterval());
+        options.setConnectionTimeout(config.getConnectionTimeout());
+        options.setCleanSession(config.isCleanSession());
+        options.setAutomaticReconnect(config.isAutoReconnect());
+        
+        return options;
+    }
+
+    /**
+     * 发布消息
+     * @param topic 主题
+     * @param message 消息内容
+     * @param qos 服务质量等级 (0, 1, 2)
+     * @param retained 是否保留消息
+     */
+    public void publish(String topic, String message, int qos, boolean retained) {
+        if (!isConnected.get()) {
+            log("MQTT未连接，无法发布消息");
+            return;
+        }
+        
+        if (topic == null || topic.trim().isEmpty()) {
+            log("主题为空，无法发布消息");
+            return;
+        }
+        
+        if (message == null) {
+            message = "";
+        }
+        
+        try {
+            MqttMessage mqttMessage = new MqttMessage(message.getBytes());
+            mqttMessage.setQos(qos);
+            mqttMessage.setRetained(retained);
+            
+            mqttClient.publish(topic, mqttMessage);
+            log("发布消息成功 [" + topic + "]: " + message);
+            
+        } catch (Exception e) {
+            logError("发布消息失败", e);
+        }
+    }
+
+    /**
+     * 发布消息（使用配置的默认QoS和retained设置）
+     * @param topic 主题
+     * @param message 消息内容
+     */
+    public void publish(String topic, String message) {
+        publish(topic, message, config.getQos(), config.isRetained());
     }
 
     /**
      * 订阅主题
      * @param topic 主题
+     * @param qos 服务质量等级 (0, 1, 2)
      */
-    public void subscribeToTopic(String topic) {
-        if(mqttClient == null || isSubscribed)
+    public void subscribe(String topic, int qos) {
+        if (!isConnected.get()) {
+            log("MQTT未连接，无法订阅主题");
             return;
-        try {
-            mqttClient.subscribe(topic);
-            isSubscribed = true;
-        } catch (Exception e) {
-            e.printStackTrace();
         }
-    }
-
-    public void publishMessage(String topic, String message) {
-        if(mqttClient == null)
+        
+        if (topic == null || topic.trim().isEmpty()) {
+            log("主题为空，无法订阅");
             return;
+        }
+        
         try {
-            MqttMessage mqttMessage = new MqttMessage(message.getBytes());
-            mqttClient.publish(topic, mqttMessage);
+            mqttClient.subscribe(topic, qos, null, new IMqttActionListener() {
+                @Override
+                public void onSuccess(IMqttToken asyncActionToken) {
+                    log("订阅主题成功: " + topic);
+                    
+                    if (listener != null) {
+                        listener.onSubscribeSuccess(topic);
+                    }
+                }
+
+                @Override
+                public void onFailure(IMqttToken asyncActionToken, Throwable exception) {
+                    logError("订阅主题失败: " + topic, exception);
+                    
+                    if (listener != null) {
+                        listener.onSubscribeFailure(topic, exception);
+                    }
+                }
+            });
+            
         } catch (Exception e) {
-            e.printStackTrace();
+            logError("订阅主题异常: " + topic, e);
+            if (listener != null) {
+                listener.onSubscribeFailure(topic, e);
+            }
         }
     }
 
     /**
-     * 重连
+     * 订阅主题（使用配置的默认QoS）
      * @param topic 主题
-     * @param reconnectCommand 重连命令
      */
-    private void reConnect(String topic, String reconnectCommand) {
-        try {
-            new Thread(){
-                @Override
-                public void run() {
-                    super.run();
-                    if (mqttClient != null) {
-                        if (!mqttClient.isConnected()) {
-                            //要下面这行代码，就不要设置 mqttConnectOptions.setAutomaticReconnect(true)
-                            try{
-                                mqttClient.connect(mqttConnectOptions);
-                                //重连上后需要重新订阅，不然收不到订阅消息
-//                        subscribeToTopic(topic);
-                                if (!isSubscribed) { // 避免重复订阅
-                                    subscribeToTopic(topic);
-                                    isSubscribed = true;
-                                }
-                                publishMessage(topic, reconnectCommand);
-                            }catch (Exception e){
-                                Log.i("dawn", "mqtt 重新连接失败");
-                            }
-                        } else {
-                            handler.removeCallbacks(runnable);
-                        }
-                    }
-                }
-            }.start();
+    public void subscribe(String topic) {
+        subscribe(topic, config.getQos());
+    }
 
+    /**
+     * 取消订阅主题
+     * @param topic 主题
+     */
+    public void unsubscribe(String topic) {
+        if (!isConnected.get()) {
+            log("MQTT未连接，无法取消订阅");
+            return;
+        }
+        
+        if (topic == null || topic.trim().isEmpty()) {
+            log("主题为空，无法取消订阅");
+            return;
+        }
+        
+        try {
+            mqttClient.unsubscribe(topic);
+            log("取消订阅成功: " + topic);
         } catch (Exception e) {
-            e.printStackTrace();
+            logError("取消订阅失败: " + topic, e);
         }
     }
 
@@ -169,16 +343,72 @@ public class MqttFactory {
      * 断开连接
      */
     public void disconnect() {
+        if (!isConnected.get()) {
+            log("MQTT未连接");
+            return;
+        }
+        
         try {
             if (mqttClient != null && mqttClient.isConnected()) {
                 mqttClient.disconnect();
-                isSubscribed = false; // 重置订阅标志
+                isConnected.set(false);
+                log("MQTT断开连接成功");
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            logError("MQTT断开连接失败", e);
         }
     }
 
+    /**
+     * 获取连接状态
+     * @return 是否已连接
+     */
+    public boolean isConnected() {
+        return isConnected.get() && mqttClient != null && mqttClient.isConnected();
+    }
 
+    /**
+     * 获取当前配置
+     * @return MQTT配置
+     */
+    public MqttConfig getConfig() {
+        return config;
+    }
 
+    /**
+     * 销毁实例（清理资源）
+     */
+    public synchronized void destroy() {
+        try {
+            if (mqttClient != null && mqttClient.isConnected()) {
+                mqttClient.disconnectForcibly();
+            }
+            
+            isInitialized.set(false);
+            isConnected.set(false);
+            isConnecting.set(false);
+            
+            log("MQTT工厂已销毁");
+            
+        } catch (Exception e) {
+            logError("销毁MQTT工厂失败", e);
+        }
+    }
+
+    /**
+     * 简单日志输出（避免依赖Android Log）
+     */
+    private void log(String message) {
+        System.out.println(TAG + ": " + message);
+    }
+
+    /**
+     * 简单错误日志输出
+     */
+    private void logError(String message, Throwable throwable) {
+        System.err.println(TAG + ": " + message);
+        if (throwable != null) {
+            throwable.printStackTrace();
+        }
+    }
 }
